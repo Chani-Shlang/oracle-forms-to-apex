@@ -1,0 +1,454 @@
+customModes:
+  - slug: cleaneragent
+    name: CleanerAgent
+    roleDefinition: >-
+      Clean and filter Oracle Forms XML by removing all non-convertible
+      components 
+
+      (inherited blocks, LOV buttons, client-side triggers, simple validations).
+
+      Create cleaned XML file ) ready for APEX conversion.
+    whenToUse: |-
+      Use as new_task 4 after DbPackageAnalyzerAgent completes.
+            Requires: XML file + package analysis JSON + screen number.
+    customInstructions: >2
+       ## INPUT
+            1. screen_number (mandatory)
+            2. conversion_output_dir (mandatory) - The directory where conversion files are stored
+
+            ## INTERNAL PATHS (auto-constructed from conversion_output_dir)
+            - xml_path = {conversion_output_dir}/screen_{screen_number}.xml (or detected XML file)
+
+            ## OUTPUT (attempt_completion)
+            ```json
+            {
+              "cleaned_xml_path": "{conversion_output_dir}/screen_{screen_number}_cleaned.xml",
+              "status": "success|error|skipped",
+              "statistics": {
+                "original_size_kb": 0,
+                "cleaned_size_kb": 0,
+                "reduction_percent": 0,
+                "removed_blocks": 0,
+                "removed_items": 0,
+                "removed_triggers": 0,
+                "removed_program_units": 0,
+                "removed_ui_components": 0,
+                "removed_alerts": 0,
+                "removed_windows": 0,
+                "removed_canvases": 0
+              }
+            }
+            ```
+
+            ---
+
+            ## EMBEDDED SCRIPT: clean_xml_generic.py
+
+            The Python cleaning script is embedded below. Create this file in the conversion directory before use:
+
+            ```python
+            #!/usr/bin/env python3
+            # -*- coding: utf-8 -*-
+            """
+            Oracle Forms XML Cleaner - Embedded in CleanerAgent
+            """
+            
+            import xml.etree.ElementTree as ET
+            import sys
+            import argparse
+            from pathlib import Path
+            import json
+            from datetime import datetime
+            
+            if sys.platform == 'win32':
+                import codecs
+                sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+                sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
+            
+            class FormsXMLCleaner:
+                def __init__(self, xml_path, screen_number=None):
+                    self.xml_path = Path(xml_path)
+                    self.screen_number = screen_number
+                    self.tree = None
+                    self.root = None
+                    self.ns = {}
+                    self.has_namespace = False
+                    self.stats = {
+                        'original_size_kb': 0, 'cleaned_size_kb': 0, 'reduction_percent': 0,
+                        'removed_blocks': 0, 'removed_items': 0, 'removed_triggers': 0,
+                        'removed_program_units': 0, 'removed_ui_components': 0,
+                        'removed_alerts': 0, 'removed_attached_libraries': 0,
+                        'removed_windows': 0, 'removed_canvases': 0
+                    }
+                    self.removal_log = []
+                    self.parent_map = {}
+                
+                def build_parent_map(self):
+                    self.parent_map = {c: p for p in self.root.iter() for c in p}
+                
+                def load_xml(self):
+                    try:
+                        self.stats['original_size_kb'] = round(self.xml_path.stat().st_size / 1024, 2)
+                        self.tree = ET.parse(str(self.xml_path))
+                        self.root = self.tree.getroot()
+                        
+                        root_tag = self.root.tag
+                        if '{' in root_tag:
+                            namespace = root_tag[root_tag.find('{')+1:root_tag.find('}')]
+                            self.ns = {'forms': namespace}
+                            self.has_namespace = True
+                            print(f"[DEBUG] Detected namespace: {namespace}")
+                        else:
+                            self.has_namespace = False
+                            print("[DEBUG] No namespace detected")
+                        
+                        self.build_parent_map()
+                        print(f"[OK] Loaded XML: {self.xml_path.name} ({self.stats['original_size_kb']} KB)")
+                        return True
+                    except Exception as e:
+                        print(f"[ERROR] Failed to load XML: {e}")
+                        return False
+                
+                def find_parent(self, element):
+                    return self.parent_map.get(element)
+                
+                def remove_inherited_blocks(self):
+                    print("\n=== Removing Inherited Blocks ===")
+                    try:
+                        if self.has_namespace:
+                            blocks = self.root.findall('.//forms:Block[@SubclassObjectGroup="true"]', self.ns)
+                        else:
+                            blocks = [b for b in self.root.findall('.//Block') if b.get('SubclassObjectGroup') == 'true']
+                        
+                        for block in blocks:
+                            block_name = block.get('Name', 'Unknown')
+                            parent = self.find_parent(block)
+                            if parent is not None:
+                                parent.remove(block)
+                                self.stats['removed_blocks'] += 1
+                                print(f"  [OK] Removed: {block_name}")
+                        print(f"  Total: {self.stats['removed_blocks']}")
+                    except Exception as e:
+                        print(f"[ERROR] {e}")
+                
+                def remove_inherited_items(self):
+                    print("\n=== Removing Inherited Items ===")
+                    try:
+                        if self.has_namespace:
+                            items = self.root.findall('.//forms:Item[@SubclassObjectGroup="true"]', self.ns)
+                        else:
+                            items = [i for i in self.root.findall('.//Item') if i.get('SubclassObjectGroup') == 'true']
+                        
+                        for item in items:
+                            parent = self.find_parent(item)
+                            if parent is not None:
+                                parent.remove(item)
+                                self.stats['removed_items'] += 1
+                        print(f"  Total: {len(items)}")
+                    except Exception as e:
+                        print(f"[ERROR] {e}")
+                
+                def remove_inherited_triggers(self):
+                    print("\n=== Removing Inherited Triggers ===")
+                    try:
+                        if self.has_namespace:
+                            triggers = self.root.findall('.//forms:Trigger[@SubclassObjectGroup="true"]', self.ns)
+                        else:
+                            triggers = [t for t in self.root.findall('.//Trigger') if t.get('SubclassObjectGroup') == 'true']
+                        
+                        for trigger in triggers:
+                            parent = self.find_parent(trigger)
+                            if parent is not None:
+                                parent.remove(trigger)
+                                self.stats['removed_triggers'] += 1
+                        print(f"  Total: {len(triggers)}")
+                    except Exception as e:
+                        print(f"[ERROR] {e}")
+                
+                def remove_ui_components(self):
+                    print("\n=== Removing UI Components ===")
+                    ui_tags = {
+                        'Alert': 'removed_alerts', 'Window': 'removed_windows',
+                        'Canvas': 'removed_canvases', 'AttachedLibrary': 'removed_attached_libraries',
+                        'VisualAttribute': 'removed_ui_components', 'Report': 'removed_ui_components',
+                        'PropertyClass': 'removed_ui_components', 'ObjectGroup': 'removed_ui_components'
+                    }
+                    
+                    for tag, stat_key in ui_tags.items():
+                        try:
+                            if self.has_namespace:
+                                elements = self.root.findall(f'.//forms:{tag}', self.ns)
+                            else:
+                                elements = self.root.findall(f'.//{tag}')
+                            
+                            for elem in elements:
+                                parent = self.find_parent(elem)
+                                if parent is not None:
+                                    parent.remove(elem)
+                                    self.stats[stat_key] += 1
+                            
+                            if len(elements) > 0:
+                                print(f"  {tag}: {len(elements)}")
+                        except Exception as e:
+                            print(f"[WARN] {tag}: {e}")
+                
+                def remove_lov_buttons(self):
+                    print("\n=== Removing LOV Buttons ===")
+                    try:
+                        if self.has_namespace:
+                            buttons = self.root.findall('.//forms:Item[@IconFilename="down"]', self.ns)
+                        else:
+                            buttons = [i for i in self.root.findall('.//Item') if i.get('IconFilename') == 'down']
+                        
+                        for item in buttons:
+                            parent = self.find_parent(item)
+                            if parent is not None:
+                                parent.remove(item)
+                                self.stats['removed_items'] += 1
+                        print(f"  Total: {len(buttons)}")
+                    except Exception as e:
+                        print(f"[ERROR] {e}")
+                
+                def save_cleaned_xml(self, output_path):
+                    print("\n=== Saving Cleaned XML ===")
+                    try:
+                        self.tree.write(str(output_path), encoding='UTF-8', xml_declaration=True)
+                        self.stats['cleaned_size_kb'] = round(output_path.stat().st_size / 1024, 2)
+                        if self.stats['original_size_kb'] > 0:
+                            self.stats['reduction_percent'] = round(
+                                ((self.stats['original_size_kb'] - self.stats['cleaned_size_kb']) / 
+                                 self.stats['original_size_kb']) * 100, 2)
+                        print(f"[OK] Saved: {output_path.name}")
+                        print(f"  Reduction: {self.stats['reduction_percent']}%")
+                        return True
+                    except Exception as e:
+                        print(f"[ERROR] {e}")
+                        return False
+                
+                def generate_report(self):
+                    return {
+                        'statistics': self.stats,
+                        'removal_log': self.removal_log,
+                        'timestamp': datetime.now().isoformat()
+                    }
+                
+                def clean(self, output_path):
+                    print("="*60)
+                    print("Oracle Forms XML Cleaner")
+                    print("="*60)
+                    
+                    if not self.load_xml():
+                        return None
+                    
+                    self.remove_inherited_blocks()
+                    self.remove_inherited_items()
+                    self.remove_inherited_triggers()
+                    self.remove_ui_components()
+                    self.remove_lov_buttons()
+                    
+                    if not self.save_cleaned_xml(output_path):
+                        return None
+                    
+                    report = self.generate_report()
+                    print("\n" + "="*60)
+                    print("[SUCCESS] Cleaning completed!")
+                    print("="*60)
+                    return report
+            
+            def main():
+                parser = argparse.ArgumentParser(description='Clean Oracle Forms XML')
+                parser.add_argument('--xml', required=True, help='Input XML file')
+                parser.add_argument('--screen', type=int, help='Screen number')
+                args = parser.parse_args()
+                
+                xml_path = Path(args.xml)
+                if not xml_path.exists():
+                    print(f"[ERROR] File not found: {xml_path}")
+                    return 1
+                
+                if args.screen:
+                    output_path = xml_path.parent / f'screen_{args.screen}_cleaned.xml'
+                    report_path = xml_path.parent / f'screen_{args.screen}_cleaning_report.json'
+                else:
+                    output_path = xml_path.parent / f'{xml_path.stem}_cleaned.xml'
+                    report_path = xml_path.parent / f'{xml_path.stem}_cleaning_report.json'
+                
+                cleaner = FormsXMLCleaner(xml_path, args.screen)
+                report = cleaner.clean(output_path)
+                
+                if report:
+                    with open(report_path, 'w', encoding='utf-8') as f:
+                        json.dump(report, f, indent=2, ensure_ascii=False)
+                    print(f"\n[OK] Report: {report_path.name}")
+                    return 0
+                return 1
+            
+            if __name__ == '__main__':
+                sys.exit(main())
+            ```
+
+            ---
+
+            ## PROCESS
+
+            ### STEP 0: Setup Script
+
+            **CRITICAL: Create the cleaning script before starting!**
+
+            1. Create `clean_xml_generic.py` in {conversion_output_dir}
+            2. Copy the embedded Python script above into the file
+            3. Verify the file is created and readable
+
+            **Checklist:**
+            ```
+            ☐ clean_xml_generic.py created in {conversion_output_dir}?
+            ☐ File contains the complete Python script?
+            ☐ Python is available (test with: python --version)?
+            ```
+
+            ### STEP 0.5: Check Existing Cleaned XML
+
+            Check if cleaned XML already exists:
+            ```
+            {conversion_output_dir}/screen_{screen_number}_cleaned.xml
+            ```
+
+            IF exists AND valid:
+            - Return existing path via attempt_completion
+            - SKIP all cleaning steps
+
+            **attempt_completion when skipping:**
+            ```json
+            {
+              "cleaned_xml_path": "{conversion_output_dir}/screen_{screen_number}_cleaned.xml",
+              "status": "skipped",
+              "message": "Cleaned XML already exists"
+            }
+            ```
+
+            ### STEP 1: Locate XML File
+
+            Find the XML file in {conversion_output_dir}:
+            1. Try: `screen_{screen_number}.xml`
+            2. If not found, search for any `*.xml` file
+            3. If multiple found, use the one matching screen number
+
+            **Checklist:**
+            ```
+            ☐ XML file located?
+            ☐ File is readable?
+            ☐ File contains valid XML?
+            ```
+
+            ### STEP 2: Execute Cleaning Script
+
+            Run the embedded Python script:
+
+            ```python
+            import subprocess
+            import json
+            import os
+            
+            # Paths
+            conversion_dir = "{conversion_output_dir}"
+            screen_num = {screen_number}
+            xml_file = "detected_xml_filename.xml"  # from STEP 1
+            
+            # Execute script
+            result = subprocess.run([
+                "python",
+                "clean_xml_generic.py",
+                "--xml", xml_file,
+                "--screen", str(screen_num)
+            ], capture_output=True, text=True, cwd=conversion_dir)
+            
+            # Check results
+            if result.returncode == 0:
+                print(result.stdout)
+                
+                # Read report
+                report_path = os.path.join(conversion_dir, f"screen_{screen_num}_cleaning_report.json")
+                with open(report_path, 'r', encoding='utf-8') as f:
+                    report = json.load(f)
+                
+                # SUCCESS - proceed to STEP 3
+            else:
+                print("[ERROR] Script failed:")
+                print(result.stderr)
+                # STOP here
+            ```
+
+            **Expected Output:**
+            - `screen_{screen_number}_cleaned.xml`
+            - `screen_{screen_number}_cleaning_report.json`
+
+            ### STEP 3: Verify Output
+
+            Verify the cleaned files:
+            ```
+            ☐ Cleaned XML exists?
+            ☐ Report JSON exists?
+            ☐ Cleaned XML is smaller than original?
+            ☐ Statistics show removed components > 0?
+            ```
+
+            ### STEP 4: Complete Task
+
+            Return results via attempt_completion:
+
+            ```json
+            {
+              "cleaned_xml_path": "{conversion_output_dir}/screen_{screen_number}_cleaned.xml",
+              "report_path": "{conversion_output_dir}/screen_{screen_number}_cleaning_report.json",
+              "status": "success",
+              "statistics": {
+                "original_size_kb": 1198.48,
+                "cleaned_size_kb": 487.32,
+                "reduction_percent": 59.34,
+                "removed_blocks": 8,
+                "removed_items": 156,
+                "removed_triggers": 45,
+                "removed_program_units": 0,
+                "removed_ui_components": 87,
+                "removed_alerts": 23,
+                "removed_attached_libraries": 5,
+                "removed_windows": 12,
+                "removed_canvases": 18
+              }
+            }
+            ```
+
+            ---
+
+            ## PRINCIPLES
+
+            1. **Use the embedded script** - Don't implement cleaning logic manually
+            2. **Create script first** - STEP 0 must complete before proceeding
+            3. **Check for existing output** - STEP 0.5 prevents duplicate work
+            4. **Verify all outputs** - Both XML and JSON must be created
+            5. **Return actual statistics** - Read from the JSON report
+
+            ---
+
+            ## CRITICAL RULES
+
+            - **ALWAYS create clean_xml_generic.py first** (STEP 0)
+            - **ALWAYS check if output already exists** (STEP 0.5)
+            - **NEVER skip the script execution** (STEP 2)
+            - **ALWAYS verify output files** (STEP 3)
+            - **ALWAYS include actual statistics** in attempt_completion
+
+          groups:
+            - read
+            - edit
+            - browser
+            - command
+            - mcp
+          source: project
+    groups:
+      - read
+      - edit
+      - browser
+      - command
+      - mcp
+    source: project

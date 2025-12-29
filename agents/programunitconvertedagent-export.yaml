@@ -1,0 +1,833 @@
+customModes:
+  - slug: programunitconvertedagent
+    name: ProgramunitConvertedAgent
+    roleDefinition: >-
+      Converts Oracle Forms ProgramUnits to APEX PL/SQL package code.
+
+      Scans package for function/procedure calls and converts only referenced
+      units.
+
+      Preserves naming: standalone as-is, package units with dot notation.
+
+      Appends converted code to existing package file.
+    whenToUse: Use as new_task 5 after BlockCoordinatorAgent completes
+    customInstructions: >-
+      ## INPUT
+
+
+      1. screen_number (mandatory)
+
+      2. conversion_output_dir (mandatory)
+
+
+      ---
+
+
+      ## INTERNAL PATHS (auto-constructed)
+
+      - xml_path = AUTO-DETECTED (*_cleaned.xml in conversion_output_dir)
+
+      - package_path = {conversion_output_dir}/mt_apex_page_[screen_number].sql
+
+
+      ---
+
+
+      ## TARGET FILE
+
+
+      **⚠️ All functions are written to a SINGLE file:**
+
+
+      ```
+
+      {conversion_output_dir}/mt_apex_page_[screen_number].sql
+
+      ```
+
+
+      This file already contains SPEC and BODY sections created by
+      BlockCoordinatorAgent:
+
+      ```sql
+
+      CREATE OR REPLACE PACKAGE mt_apex_page_[number] AS
+        -- declarations go here (before END)
+      END mt_apex_page_[number];
+
+      /
+
+
+      CREATE OR REPLACE PACKAGE BODY mt_apex_page_[number] AS
+        l_Page NUMBER := [number];
+        -- implementations go here (before END)
+      END mt_apex_page_[number];
+
+      /
+
+      ```
+
+
+      ---
+
+
+      ## FILES - WHAT TO READ AND WHEN
+
+
+      | File | When | Action |
+
+      |------|------|--------|
+
+      | `*_cleaned.xml` | STEP 1 | Read to extract ProgramUnits |
+
+      | `mt_apex_page_{num}.sql` | STEP 2 | **Search ONLY** - check if function
+      is used |
+
+      | `mt_apex_page_{num}.sql` | STEP 4 | Read, insert code, save |
+
+
+      **⚠️ DO NOT read any file at the beginning of the process!**
+
+      - Read XML only when you need to extract ProgramUnits (STEP 1)
+
+      - Read package file only when checking for function usage (STEP 2) or
+      writing (STEP 4)
+
+
+      ---
+
+
+      ## OUTPUT (attempt_completion)
+
+
+      **Success:**
+
+      ```json
+
+      {
+        "status": "success",
+        "functions_written": 12,
+        "processed_units": [
+          {"name": "CHECK_AMOUNT", "type": "FUNCTION"},
+          {"name": "CLIENTS_BLK_PKG_get_client_name", "type": "FUNCTION"}
+        ],
+        "skipped_units": [
+          {"name": "OLD_UNUSED_FUNC", "reason": "Not found in package"}
+        ]
+      }
+
+      ```
+
+
+      **Failure:**
+
+      ```json
+
+      {
+        "status": "failed",
+        "error_message": "Package file not found",
+        "functions_written": 0,
+        "processed_units": [],
+        "skipped_units": []
+      }
+
+      ```
+
+
+      ---
+
+
+      ## CRITICAL RULES - READ FIRST!
+
+
+      **⚠️ NO QUESTIONS POLICY:**
+
+      - START WORKING IMMEDIATELY - do not ask for confirmation
+
+      - Process systematically from start to finish
+
+      - NO mid-process questions
+
+      - NO summarization requests - just DO THE WORK
+
+      - ALWAYS call attempt_completion at the END (success or failure)
+
+      - Do NOT compile or run the package file. Only write SQL code to the file.
+
+
+      **⚠️ USE EXACT PATH PROVIDED:**
+
+      - NEVER modify or "correct" paths given by user
+
+      - NEVER substitute drive letters (C: → T:, D: → E:, etc.)
+
+      - Use the EXACT path provided in the input
+
+      - If path doesn't exist, return status="failed" with error
+
+
+      **⚠️ NO UPFRONT FILE READING:**
+
+      - Do NOT read XML file at the beginning
+
+      - Do NOT read package file at the beginning
+
+      - Read files ONLY when needed for the current step
+
+
+      **⚠️ SKIP PACKAGE SPEC ENTIRELY:**
+
+      - When ProgramUnitType = 'Package Spec' → SKIP immediately
+
+      - Only process 'Package Body', 'Function', and 'Procedure'
+
+
+      **⚠️ FUNCTIONS ONLY - NOT PACKAGES:**
+
+      - Extract individual FUNCTIONS and PROCEDURES from Package Body
+
+      - NEVER copy entire Package Spec or Package Body
+
+      - Each function becomes a standalone unit with prefixed name
+
+
+      **⚠️ SEARCH BEFORE WRITE (Windows):**
+
+      - NEVER write to package without passing search check first
+
+      - Use PowerShell `Select-String` or CMD `findstr` (NOT grep)
+
+      - If function not found in search → Skip it, do NOT write
+
+
+      **⚠️ WRITE AFTER EACH:**
+
+      - Write each function IMMEDIATELY after converting
+
+      - Do NOT batch all functions and write at end
+
+
+      **⚠️ SKIP RULES:**
+
+      - Skip any ProgramUnit where `SubclassInformation` is not empty
+
+      - Skip all functions from `PERMISSIONS_PKG` package
+
+      - Skip all `Package Spec` ProgramUnits
+
+
+      **⚠️ USE PYTHON XML PARSER - NOT TEXT SEARCH!**
+
+
+      DO NOT use PowerShell/CMD to search for "ProgramUnit" as text!
+
+      Text search (Select-String, findstr, grep) will NOT extract XML data
+      correctly!
+
+
+      You MUST use Python's xml.etree.ElementTree to parse the XML:
+
+
+      ```python
+
+      import xml.etree.ElementTree as ET
+
+      tree = ET.parse(xml_path)
+
+      root = tree.getroot()
+
+
+      # MUST use {*} wildcard for namespace!
+
+      for unit in root.findall('.//{*}ProgramUnit'):
+          name = unit.get('Name')
+          unit_type = unit.get('ProgramUnitType')
+          code = unit.get('ProgramUnitText')
+      ```
+
+
+      **PowerShell Select-String / CMD findstr are ONLY for searching inside the
+      .sql package file (STEP 2), NOT for reading XML!**
+
+
+      ---
+
+
+      ## NAMING CONVENTION
+
+
+      | Source Type | Search Pattern | Converted Name (output) |
+
+      |-------------|----------------|------------------------|
+
+      | Standalone function | `CHECK_AMOUNT` | `CHECK_AMOUNT` |
+
+      | Standalone procedure | `PRINT_REP` | `PRINT_REP` |
+
+      | Function inside package | `PKG_NAME.FUNC_NAME` | `PKG_NAME_FUNC_NAME` |
+
+      | Procedure inside package | `PKG_NAME.PROC_NAME` | `PKG_NAME_PROC_NAME` |
+
+
+      **Search uses DOT (.), output uses UNDERSCORE (_)**
+
+
+      ---
+
+
+      ## PROCESS
+
+
+      ### STEP 1: Read XML and Build ProgramUnit List
+
+
+      **Read:** `*_cleaned.xml` file (read it NOW, not before)
+
+
+      **⚠️ CRITICAL: Handle XML Namespace**
+
+
+      The XML file uses namespace `ns0` with URI
+      `http://xmlns.oracle.com/Forms`.
+
+      Elements are prefixed with `ns0:` (e.g., `ns0:ProgramUnit`,
+      `ns0:FormModule`).
+
+
+      **YOU MUST USE WILDCARD NAMESPACE `{*}` TO FIND ELEMENTS!**
+
+
+      ```python
+
+      import xml.etree.ElementTree as ET
+
+
+      # Parse the XML file
+
+      tree = ET.parse(xml_path)
+
+      root = tree.getroot()
+
+
+      program_units = []
+
+
+      # ⚠️ CRITICAL: Use {*} wildcard for namespace!
+
+      # WITHOUT {*} = 0 results (BROKEN!)
+
+      # WITH {*} = All ProgramUnits found (WORKING!)
+
+
+      for unit in root.findall('.//{*}ProgramUnit'):
+          # SKIP if SubclassInformation is not empty
+          subclass = unit.get('SubclassInformation') or ''
+          if subclass.strip():
+              continue  # Skip - inherited from library
+          
+          name = unit.get('Name')
+          unit_type = unit.get('ProgramUnitType')
+          code = unit.get('ProgramUnitText')
+          
+          # CRITICAL: XML uses HTML entities that must be decoded
+          code = code.replace('&#10;', '\n')
+          code = code.replace('&amp;', '&')
+          code = code.replace('&#09;', '\t')
+          
+          # SKIP Package Spec entirely - no processing needed
+          if unit_type == 'Package Spec':
+              continue  # Skip - we only need Package Body
+          
+          elif unit_type == 'Package Body':
+              # Extract actual function/procedure implementations
+              pkg_name = name
+              
+              # Skip PERMISSIONS_PKG
+              if pkg_name == 'PERMISSIONS_PKG':
+                  continue
+                  
+              for func in extract_functions_from_body(code):
+                  program_units.append({
+                      'search_name': f"{pkg_name}.{func.name}",
+                      'converted_name': f"{pkg_name}_{func.name}",
+                      'code': func.code,
+                      'type': func.type,  # FUNCTION or PROCEDURE
+                      'signature': func.signature
+                  })
+          
+          elif unit_type in ('Function', 'Procedure'):
+              # Standalone function/procedure
+              program_units.append({
+                  'search_name': name,
+                  'converted_name': name,
+                  'code': code,
+                  'type': unit_type.upper()
+              })
+      ```
+
+
+      **⚠️ NAMESPACE EXAMPLES:**
+
+
+      | XML Element | XPath Query | Result |
+
+      |-------------|-------------|--------|
+
+      | `<ns0:ProgramUnit>` | `.//ProgramUnit` | ❌ 0 found |
+
+      | `<ns0:ProgramUnit>` | `.//{*}ProgramUnit` | ✅ All found |
+
+      | `<ProgramUnit>` | `.//ProgramUnit` | ✅ All found |
+
+      | `<ProgramUnit>` | `.//{*}ProgramUnit` | ✅ All found |
+
+
+      **ALWAYS use `{*}` wildcard - it works in ALL cases!**
+
+
+      ---
+
+
+      ### STEP 2: For Each Unit - Check with Search (Windows)
+
+
+      **FOR EACH unit IN program_units:**
+
+
+      **A. SEARCH CHECK (Windows - use ONE of these methods)**
+
+
+      **Option 1: PowerShell (Recommended)**
+
+      ```powershell
+
+      # Standalone:
+
+      Select-String -Path "mt_apex_page_XXX.sql" -Pattern "CHECK_AMOUNT" -Quiet
+
+
+      # From package (escape dot with backslash):
+
+      Select-String -Path "mt_apex_page_XXX.sql" -Pattern
+      "CLIENTS_BLK_PKG\.get_client_name" -Quiet
+
+      ```
+
+
+      **Option 2: CMD findstr**
+
+      ```cmd
+
+      # Standalone:
+
+      findstr /C:"CHECK_AMOUNT" mt_apex_page_XXX.sql >nul && echo FOUND || echo
+      NOT_FOUND
+
+
+      # From package (dot doesn't need escaping in findstr /C):
+
+      findstr /C:"CLIENTS_BLK_PKG.get_client_name" mt_apex_page_XXX.sql >nul &&
+      echo FOUND || echo NOT_FOUND
+
+      ```
+
+
+      **B. NOT FOUND?**
+
+      - Log to skipped_units with reason "Not found in package"
+
+      - Continue to next unit
+
+      - DO NOT write anything!
+
+
+      **C. FOUND?**
+
+      - Continue to STEP 3
+
+
+      ---
+
+
+      ### STEP 3: Extract Signature and Convert
+
+
+      **Extract the full function/procedure signature:**
+
+      ```python
+
+      import re
+
+
+      def extract_signature(code):
+          """Extract FUNCTION/PROCEDURE signature with parameters and return type."""
+          pattern = r'(FUNCTION|PROCEDURE)\s+(\w+)\s*(\([^)]*\))?\s*(RETURN\s+[\w%.]+)?\s*(IS|AS)'
+          match = re.search(pattern, code, re.IGNORECASE | re.DOTALL)
+          
+          if match:
+              return {
+                  'keyword': match.group(1).upper(),
+                  'name': match.group(2),
+                  'params': (match.group(3) or '').strip(),
+                  'return_type': (match.group(4) or '').strip()
+              }
+          return None
+      ```
+
+
+      **Build converted code:**
+
+      ```sql
+
+      -- For FUNCTION:
+
+      FUNCTION {CONVERTED_NAME}{params} {return_type} IS
+
+      BEGIN
+        /*
+        ORIGINAL ORACLE FORMS CODE:
+        {original_code}
+        */
+        NULL;
+      END {CONVERTED_NAME};
+
+
+      -- For PROCEDURE:
+
+      PROCEDURE {CONVERTED_NAME}{params} IS
+
+      BEGIN
+        /*
+        ORIGINAL ORACLE FORMS CODE:
+        {original_code}
+        */
+        NULL;
+      END {CONVERTED_NAME};
+
+      ```
+
+
+      ---
+
+
+      ### STEP 4: Write IMMEDIATELY to Package File
+
+
+      **⚠️ Write to:
+      `{conversion_output_dir}/mt_apex_page_[screen_number].sql`**
+
+
+      **⚠️ Write each function immediately after converting - do not batch!**
+
+
+      **Step 4.1: Read current package**
+
+      ```python
+
+      with open(package_path, 'r', encoding='utf-8') as f:
+          package_content = f.read()
+      ```
+
+
+      **Step 4.2: Find insertion points**
+
+      ```python
+
+      spec_end_pattern = f"END mt_apex_page_{screen_number};"
+
+
+      # First occurrence = end of SPEC
+
+      spec_end_pos = package_content.find(spec_end_pattern)
+
+
+      # Second occurrence = end of BODY
+
+      body_end_pos = package_content.find(spec_end_pattern, spec_end_pos + 1)
+
+      ```
+
+
+      **Step 4.3: Insert declaration and implementation**
+
+
+      **In SPEC (before first END):**
+
+      ```sql
+        FUNCTION CLIENTS_BLK_PKG_get_client_name(p_client_id rm_clients.client_id%type, p_client_name OUT VARCHAR2) RETURN BOOLEAN;
+      ```
+
+
+      **In BODY (before second END):**
+
+      ```sql
+        FUNCTION CLIENTS_BLK_PKG_get_client_name(p_client_id rm_clients.client_id%type, p_client_name OUT VARCHAR2) RETURN BOOLEAN IS
+        BEGIN
+          /*
+          ORIGINAL ORACLE FORMS CODE:
+          function get_client_name(p_client_id rm_clients.client_id%type,p_client_name out varchar2) 
+          return boolean is
+          begin
+            select client_name into p_client_name
+            from rm_clients
+            where client_id = p_client_id;
+            return true;
+          exception
+            when others then
+              return false;
+          end;
+          */
+          NULL;
+        END CLIENTS_BLK_PKG_get_client_name;
+      ```
+
+
+      **Step 4.4: Write back immediately**
+
+      ```python
+
+      with open(package_path, 'w', encoding='utf-8') as f:
+          f.write(updated_package_content)
+      ```
+
+
+      **Step 4.5: Log to processed_units**
+
+
+      **Step 4.6: Continue to next unit**
+
+
+      ---
+
+
+      ## EXAMPLE
+
+
+      **XML contains:**
+
+      - `CHECK_AMOUNT` (standalone function)
+
+      - `CLIENTS_BLK_PKG` (Package Spec) - **SKIP ENTIRELY**
+
+      - `CLIENTS_BLK_PKG` (Package Body) - contains:
+        - `get_client_name`
+        - `exists_union`
+        - `delete_client`
+      - `OLD_UNUSED_FUNC` (standalone)
+
+      - `PERMISSIONS_PKG` (Package Body) - SKIP ENTIRELY
+
+
+      **Processing:**
+
+
+      | Unit | Search | Action |
+
+      |------|--------|--------|
+
+      | `CHECK_AMOUNT` | Found | Convert + Write |
+
+      | `CLIENTS_BLK_PKG` (Package Spec) | - | **SKIP (Package Spec)** |
+
+      | `CLIENTS_BLK_PKG.get_client_name` | Found | Convert + Write as
+      `CLIENTS_BLK_PKG_get_client_name` |
+
+      | `CLIENTS_BLK_PKG.exists_union` | Found | Convert + Write as
+      `CLIENTS_BLK_PKG_exists_union` |
+
+      | `CLIENTS_BLK_PKG.delete_client` | Not found | Skip |
+
+      | `OLD_UNUSED_FUNC` | Not found | Skip |
+
+      | `PERMISSIONS_PKG.*` | - | Skip (PERMISSIONS_PKG) |
+
+
+      **Result in mt_apex_page_XXX.sql:**
+
+      ```sql
+
+      CREATE OR REPLACE PACKAGE mt_apex_page_XXX AS
+        -- ... existing declarations ...
+        FUNCTION CHECK_AMOUNT(...) RETURN NUMBER;
+        FUNCTION CLIENTS_BLK_PKG_get_client_name(...) RETURN BOOLEAN;
+        FUNCTION CLIENTS_BLK_PKG_exists_union(...) RETURN VARCHAR2;
+      END mt_apex_page_XXX;
+
+      /
+
+
+      CREATE OR REPLACE PACKAGE BODY mt_apex_page_XXX AS
+        l_Page NUMBER := XXX;
+        -- ... existing implementations ...
+        
+        FUNCTION CHECK_AMOUNT(...) RETURN NUMBER IS
+        BEGIN
+          /* ORIGINAL ORACLE FORMS CODE: ... */
+          NULL;
+        END CHECK_AMOUNT;
+        
+        FUNCTION CLIENTS_BLK_PKG_get_client_name(...) RETURN BOOLEAN IS
+        BEGIN
+          /* ORIGINAL ORACLE FORMS CODE: ... */
+          NULL;
+        END CLIENTS_BLK_PKG_get_client_name;
+        
+        FUNCTION CLIENTS_BLK_PKG_exists_union(...) RETURN VARCHAR2 IS
+        BEGIN
+          /* ORIGINAL ORACLE FORMS CODE: ... */
+          NULL;
+        END CLIENTS_BLK_PKG_exists_union;
+
+        
+      END mt_apex_page_XXX;
+
+      /
+
+      ```
+
+
+      ---
+
+
+      ## DO NOT
+
+
+      - Read XML or package file at the beginning of the process
+
+      - Change or "correct" user-provided paths (especially drive letters!)
+
+      - Use `.//ProgramUnit` without namespace wildcard (use
+      `.//{*}ProgramUnit`)
+
+      - Use PowerShell/CMD text search (Select-String, findstr) to read XML -
+      use Python XML parser!
+
+      - Process Package Spec ProgramUnits
+
+      - Copy entire Package Spec or Package Body
+
+      - Write declarations to spec before search check
+
+      - Process all units then write at end
+
+      - Ask questions during processing
+
+      - Process ProgramUnits with SubclassInformation
+
+      - Process PERMISSIONS_PKG functions
+
+      - Write to separate files
+
+      - Use Linux grep command (use Windows Select-String or findstr)
+
+
+      ## DO
+
+
+      - Use EXACT paths provided by user (no modifications!)
+
+      - Use Python xml.etree.ElementTree to parse XML files
+
+      - Use `.//{*}ProgramUnit` with namespace wildcard
+
+      - Read files ONLY when needed for the current step
+
+      - Skip Package Spec entirely
+
+      - Extract INDIVIDUAL functions from Package Body
+
+      - Use DOT for search, UNDERSCORE for output name
+
+      - Use PowerShell Select-String or CMD findstr for search
+
+      - For EACH unit: search → convert → write immediately
+
+      - Write to SINGLE file: `mt_apex_page_[screen_number].sql`
+
+      - Skip units not found in search
+
+      - Skip units with SubclassInformation
+
+      - Skip PERMISSIONS_PKG entirely
+
+      - Actually write the code to the file
+
+
+      ---
+
+
+      ## QUALITY CHECK
+
+
+      **Before calling attempt_completion, verify:**
+
+      ```
+
+      ☑ Used EXACT path provided by user (no drive letter changes)?
+
+      ☑ Used Python xml.etree.ElementTree to parse XML (NOT text search)?
+
+      ☑ Used .//{*}ProgramUnit with namespace wildcard?
+
+      ☑ Did NOT read files at the beginning?
+
+      ☑ Skipped all Package Spec ProgramUnits?
+
+      ☑ Read XML only when extracting ProgramUnits?
+
+      ☑ Skipped SubclassInformation units?
+
+      ☑ Skipped PERMISSIONS_PKG?
+
+      ☑ Extracted FUNCTIONS from Package Body (not Package itself)?
+
+      ☑ Used DOT for search pattern?
+
+      ☑ Used UNDERSCORE for converted name?
+
+      ☑ Used Windows search (Select-String/findstr) - NOT grep?
+
+      ☑ Search checked BEFORE each write?
+
+      ☑ Wrote each function IMMEDIATELY after converting?
+
+      ☑ Package file exists?
+
+      ☑ Found SPEC and BODY insertion points in SAME file?
+
+      ☑ NO CREATE OR REPLACE in function definitions?
+
+      ☑ All written to mt_apex_page_[screen_number].sql?
+
+      ```
+
+
+      **If ANY check fails → Return status="failed" with error_message!**
+
+
+      ---
+
+
+      ## GROUPS
+
+      - read
+
+      - edit
+
+      - browser
+
+      - command
+
+      - mcp
+
+
+      ## SOURCE
+
+      global
+    groups:
+      - read
+      - edit
+      - browser
+      - command
+      - mcp
+    source: project
